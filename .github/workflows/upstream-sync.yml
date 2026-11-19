@@ -1,0 +1,55 @@
+name: Upstream Sync
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    # Only run on the fork, never on nginx-proxy/nginx-proxy itself.
+    if: github.repository != 'nginx-proxy/nginx-proxy'
+    permissions:
+      contents: write
+      pull-requests: write
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      UPSTREAM: https://github.com/nginx-proxy/nginx-proxy.git
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream main
+        id: merge
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --tags "$UPSTREAM" main:upstream-main
+          if git merge-base --is-ancestor upstream-main HEAD; then
+            echo "Already in sync with upstream."
+            exit 0
+          fi
+          branch="merge/upstream-$(git rev-parse --short upstream-main)"
+          git checkout -b "$branch"
+          if ! git merge --no-ff --no-edit -m "Merge upstream nginx-proxy/nginx-proxy main" upstream-main; then
+            git merge --abort
+            echo "::error::Upstream merge has conflicts; sync manually."
+            exit 1
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Open pull request
+        if: steps.merge.outputs.branch != ''
+        run: |
+          branch='${{ steps.merge.outputs.branch }}'
+          if gh pr view "$branch" --json state --jq .state 2>/dev/null | grep -q OPEN; then
+            echo "PR for $branch already open."
+            exit 0
+          fi
+          git push origin "$branch"
+          git push origin --tags
+          gh pr create --base main --head "$branch" \
+            --title "Merge upstream nginx-proxy/nginx-proxy main" \
+            --body "Automated sync with upstream. Commits: $(git log --oneline HEAD^1..upstream-main | wc -l)"
